@@ -1,0 +1,10 @@
+Feature,Importance
+credit_score,0.20915185309998643
+existing_loans_count,0.20425326864349128
+employment_status,0.19908998039744133
+num_dependents,0.19469548663452227
+annual_income,0.1928094112245588
+age,0.0
+loan_amount,0.0
+gender,0.0
+marital_status,0.0
