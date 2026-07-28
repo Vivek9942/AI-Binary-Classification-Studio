@@ -2,7 +2,8 @@
 
 An end-to-end, no-code Streamlit app to **upload, clean, train, evaluate, and predict** on any binary classification dataset — no ML experience required.
 
-🔗 **Live App:** [ai-binary-classification-studio.streamlit.app](https://ai-binary-classification-studio-d73kncushjngirdaj5top7.streamlit.app)
+🔗 **Live App:** [ai-binary-classification-studio.streamlit.app](ai-binary-classification-studio-ppqipctkuojykpozghsbaz
+.streamlit.app)
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
