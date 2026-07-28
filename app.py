@@ -292,24 +292,20 @@ with tab3:
 
         target_encoder = None
 
-        if cleaned_df[target_column].dtype == "object":
+        if not is_numeric_dtype(cleaned_df[target_column]):
 
             target_encoder = LabelEncoder()
 
             cleaned_df[target_column] = target_encoder.fit_transform(
-                cleaned_df[target_column]
+                cleaned_df[target_column].astype(str)
             )
 
-            # This is the REAL mapping the model is trained on.
             target_label_map = {
                 int(i): str(cls) for i, cls in enumerate(target_encoder.classes_)
             }
 
         else:
 
-            # Target already numeric (e.g. 0/1). Build the label map
-            # straight from the sorted unique values so it's guaranteed
-            # to match what the model actually sees.
             sorted_vals = sorted(cleaned_df[target_column].dropna().unique())
             target_label_map = {
                 int(v): str(v) for v in sorted_vals
