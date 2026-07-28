@@ -1,5 +1,7 @@
+from imblearn.over_sampling import SMOTE
 import streamlit as st
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -7,13 +9,18 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import ExtraTreesClassifier
 
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
     recall_score,
-    f1_score
+    f1_score,
+    confusion_matrix,
+    precision_recall_curve,
+    roc_auc_score
 )
+
 
 # ---------------------------
 # Page Configuration
@@ -28,7 +35,10 @@ st.set_page_config(
 # Main Title
 # ---------------------------
 st.title("🤖 AI Binary Classification Studio")
-st.markdown("Upload any **Binary Classification CSV Dataset** and perform the complete Machine Learning workflow.")
+st.markdown(
+    "Upload any **Binary Classification CSV Dataset**. "
+    "The **last column** is automatically used as the target label."
+)
 
 st.divider()
 
@@ -67,40 +77,60 @@ with tab1:
         col3.metric("Missing Values", df.isnull().sum().sum())
         col4.metric("Duplicate Rows", df.duplicated().sum())
 
-        binary_columns = [
+        # -----------------------------------------
+        # Target column = last column, automatically
+        # -----------------------------------------
+        target_column = df.columns[-1]
 
-            col for col in df.columns
+        st.subheader("🎯 Target Column (auto-detected: last column)")
+        st.markdown(f"Target Column → **`{target_column}`**")
 
-            if df[col].dropna().nunique() == 2
+        unique_vals = df[target_column].dropna().unique()
+        n_unique = len(unique_vals)
 
-        ]
+        st.write(f"Unique values found: **{n_unique}**")
+        st.write("Values:", list(unique_vals))
 
-        target_column = st.selectbox(
-            "Select Target Column",
-            binary_columns
-        )
+        if n_unique != 2:
 
-        st.session_state["target_column"] = target_column
-        target_dtype = df[target_column].dtype
-
-        from pandas.api.types import is_numeric_dtype
-
-        if is_numeric_dtype(df[target_column]):
-
-            st.subheader("Prediction Labels")
-
-            class0_label = st.text_input(
-                "Prediction for Class 0",
-                value="Class 0"
+            st.error(
+                f"❌ This app only supports **binary classification**. "
+                f"The last column `{target_column}` has {n_unique} unique "
+                f"values, not 2. Please make sure the last column of your "
+                f"CSV is the binary label you want to predict."
             )
 
-            class1_label = st.text_input(
-                "Prediction for Class 1",
-                value="Class 1"
-            )
+            # Don't let the rest of the app proceed with a bad target
+            st.session_state.pop("target_column", None)
+            st.session_state.pop("target_label_map", None)
 
-            st.session_state["class0_label"] = class0_label
-            st.session_state["class1_label"] = class1_label
+        else:
+
+            st.session_state["target_column"] = target_column
+
+            # Work out the encoding order that will actually be used later.
+            # LabelEncoder (and a plain sort) both assign 0 -> smaller/
+            # alphabetically-first value, 1 -> the other one. We mirror
+            # that here so the preview matches training exactly.
+            sorted_vals = sorted(unique_vals, key=lambda v: str(v))
+
+            preview_label_map = {
+                0: str(sorted_vals[0]),
+                1: str(sorted_vals[1])
+            }
+
+            st.session_state["target_label_map"] = preview_label_map
+
+            st.subheader("🔢 Encoding that will be used for training")
+
+            enc_col1, enc_col2 = st.columns(2)
+            enc_col1.info(f"**0** → {preview_label_map[0]}")
+            enc_col2.info(f"**1** → {preview_label_map[1]}")
+
+            st.caption(
+                "This is the exact encoding the model will be trained on. "
+                "Predictions will be shown using this same mapping."
+            )
 
 with tab2:
 
@@ -146,11 +176,14 @@ with tab2:
     else:
         st.info("Please upload a dataset first.")
 
+
 with tab3:
 
-    if "df" in st.session_state:
+    if "df" in st.session_state and "target_column" in st.session_state:
 
         df = st.session_state["df"]
+        target_column = st.session_state["target_column"]
+
         # Save original dataset
         st.session_state["original_df"] = df.copy()
 
@@ -169,7 +202,7 @@ with tab3:
 
             col for col in cleaned_df.columns
 
-            if cleaned_df[col].nunique(dropna=False) <= 1
+            if col != target_column and cleaned_df[col].nunique(dropna=False) <= 1
 
         ]
 
@@ -181,7 +214,7 @@ with tab3:
         # Remove ID columns automatically
         id_columns = [
             col for col in cleaned_df.columns
-            if "id" in col.lower()
+            if "id" in col.lower() and col != target_column
         ]
 
         cleaned_df.drop(columns=id_columns, inplace=True, errors="ignore")
@@ -198,8 +231,6 @@ with tab3:
 
         # Separate numerical and categorical columns
 
-        target_column = st.session_state["target_column"]
-
         numerical_columns = [
 
             col for col in cleaned_df.select_dtypes(
@@ -211,10 +242,8 @@ with tab3:
         ]
 
         st.session_state["numerical_columns"] = list(
-        numerical_columns
+            numerical_columns
         )
-
-        target_column = st.session_state["target_column"]
 
         categorical_columns = [
 
@@ -271,7 +300,23 @@ with tab3:
                 cleaned_df[target_column]
             )
 
+            # This is the REAL mapping the model is trained on.
+            target_label_map = {
+                int(i): str(cls) for i, cls in enumerate(target_encoder.classes_)
+            }
+
+        else:
+
+            # Target already numeric (e.g. 0/1). Build the label map
+            # straight from the sorted unique values so it's guaranteed
+            # to match what the model actually sees.
+            sorted_vals = sorted(cleaned_df[target_column].dropna().unique())
+            target_label_map = {
+                int(v): str(v) for v in sorted_vals
+            }
+
         st.session_state["target_encoder"] = target_encoder
+        st.session_state["target_label_map"] = target_label_map
 
         for col in categorical_columns:
 
@@ -290,8 +335,6 @@ with tab3:
         st.session_state["cleaned_df"] = cleaned_df
         st.session_state["label_encoders"] = label_encoders
 
-
-
         st.subheader("🧹 Data Preprocessing")
 
         rows_after = cleaned_df.shape[0]
@@ -305,6 +348,12 @@ with tab3:
         col2.metric("Columns", cols_after)
         col3.metric("Duplicate Rows", duplicate_rows)
         col4.metric("Missing Values", missing_values)
+
+        st.subheader("Confirmed Target Encoding")
+
+        enc_col1, enc_col2 = st.columns(2)
+        enc_col1.success(f"**0** → {target_label_map.get(0, '0')}")
+        enc_col2.success(f"**1** → {target_label_map.get(1, '1')}")
 
         st.subheader("Cleaned Dataset")
 
@@ -322,7 +371,10 @@ with tab3:
 
     else:
 
-        st.info("Please upload a dataset first.")
+        st.info(
+            "Please upload a dataset with a valid 2-class target "
+            "column (last column) first."
+        )
 
 with tab4:
 
@@ -333,9 +385,23 @@ with tab4:
         target_column = st.session_state["target_column"]
 
         st.subheader("🤖 Model Training")
+        # ----------------------------------
+        # Select Model
+        # ----------------------------------
+
+        selected_model = st.selectbox(
+            "Select Machine Learning Model",
+            (
+                "Logistic Regression",
+                "Random Forest",
+                "Gradient Boosting",
+                "Extra Trees"
+            )
+        )
+
+        train_button = st.button("🚀 Train Selected Model")
 
         X = cleaned_df.drop(columns=[target_column], errors="ignore")
-        
 
         # Remove score columns that directly leak the target
         leakage_columns = [
@@ -354,74 +420,240 @@ with tab4:
 
         st.session_state["feature_columns"] = X.columns.tolist()
 
+        # Target column is already encoded to 0/1 ints from tab3
         y = cleaned_df[target_column]
 
-        target_encoder = None
+        if train_button:
 
-        if y.dtype == "object":
+            try:
 
-            target_encoder = LabelEncoder()
-            y = target_encoder.fit_transform(y)
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X,
+                    y,
+                    test_size=0.20,
+                    random_state=42,
+                    stratify=y
+                )
 
-        st.session_state["target_encoder"] = target_encoder
+                # =====================================================
+                # Detect Dataset Imbalance
+                # =====================================================
 
-        try:
+                class_counts = y_train.value_counts()
 
-            X_train, X_test, y_train, y_test = train_test_split(
-                X,
-                y,
-                test_size=0.20,
-                random_state=42,
-                stratify=y
-            )
+                class_percentages = y_train.value_counts(normalize=True) * 100
 
-        except ValueError:
+                majority_class = class_counts.idxmax()
+                minority_class = class_counts.idxmin()
 
-            X_train, X_test, y_train, y_test = train_test_split(
-                X,
-                y,
-                test_size=0.20,
-                random_state=42
-            )
+                majority_percentage = class_percentages.max()
+                minority_percentage = class_percentages.min()
 
-        scaler = StandardScaler()
+                # Dataset is considered imbalanced if one class exceeds 70%
+                is_imbalanced = majority_percentage > 70
 
-        X_train_scaled = scaler.fit_transform(X_train)
+                st.subheader("📊 Class Distribution")
 
-        X_test_scaled = scaler.transform(X_test)
-        st.session_state["X_test"] = X_test
-        st.session_state["y_test"] = y_test
+                distribution_df = pd.DataFrame({
+                    "Class": class_counts.index,
+                    "Count": class_counts.values,
+                    "Percentage": class_percentages.values.round(2)
+                })
 
-        models = {
+                st.dataframe(distribution_df, use_container_width=True)
 
-            "Logistic Regression": LogisticRegression(max_iter=1000),
+                if is_imbalanced:
 
-            "Random Forest": RandomForestClassifier(random_state=42),
+                    st.warning(
+                        f"""
+                ⚠️ Imbalanced Dataset Detected
 
-            "Gradient Boosting": GradientBoostingClassifier(random_state=42)
+                Majority Class : {majority_class}
+                ({majority_percentage:.2f}%)
 
-        }
+                Minority Class : {minority_class}
+                ({minority_percentage:.2f}%)
+                """
+                    )
 
-        results = []
+                else:
 
-        best_accuracy = 0
-        best_model = None
-        best_model_name = ""
+                    st.success(
+                        f"""
+                ✅ Balanced Dataset
 
-        for model_name, model in models.items():
+                Largest Class :
+                {majority_percentage:.2f}%
+                """
+                    )
 
-            if model_name == "Logistic Regression":
+                # Store for later use
+                st.session_state["is_imbalanced"] = is_imbalanced
+
+                # ==========================================================
+                # Apply SMOTE only for Imbalanced Dataset
+                # ==========================================================
+
+                if is_imbalanced:
+
+                    smote = SMOTE(
+                        random_state=42,
+                        k_neighbors=5
+                    )
+
+                    X_train, y_train = smote.fit_resample(
+                        X_train,
+                        y_train
+                    )
+
+                    st.success("✅ SMOTE Applied Successfully")
+
+                    after_counts = y_train.value_counts()
+
+                    after_percentage = (
+                        y_train.value_counts(normalize=True) * 100
+                    )
+
+                    after_df = pd.DataFrame({
+
+                        "Class": after_counts.index,
+
+                        "Count": after_counts.values,
+
+                        "Percentage": after_percentage.values.round(2)
+
+                    })
+
+                    st.subheader("📊 Class Distribution After SMOTE")
+
+                    st.dataframe(
+                        after_df,
+                        use_container_width=True
+                    )
+
+            except ValueError:
+
+                is_imbalanced = False
+
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X,
+                    y,
+                    test_size=0.20,
+                    random_state=42
+                )
+
+            scaler = StandardScaler()
+
+            X_train_scaled = scaler.fit_transform(X_train)
+
+            X_test_scaled = scaler.transform(X_test)
+            st.session_state["X_test"] = X_test
+            st.session_state["y_test"] = y_test
+
+            models = {
+
+                "Logistic Regression": LogisticRegression(
+                    max_iter=2000,
+                    class_weight="balanced",
+                    random_state=42
+                ),
+
+                "Random Forest": RandomForestClassifier(
+                    n_estimators=300,
+                    max_depth=12,
+                    min_samples_split=5,
+                    min_samples_leaf=2,
+                    class_weight="balanced",
+                    random_state=42,
+                    n_jobs=-1
+                ),
+
+                "Gradient Boosting": GradientBoostingClassifier(
+                    n_estimators=300,
+                    learning_rate=0.05,
+                    random_state=42
+                ),
+
+                "Extra Trees": ExtraTreesClassifier(
+                    n_estimators=300,
+                    max_depth=12,
+                    min_samples_split=5,
+                    min_samples_leaf=2,
+                    random_state=42,
+                    n_jobs=-1
+                )
+
+            }
+
+            model = models[selected_model]
+
+            if selected_model == "Logistic Regression":
 
                 model.fit(X_train_scaled, y_train)
-                predictions = model.predict(X_test_scaled)
+
+                probabilities = model.predict_proba(X_test_scaled)[:, 1]
+
+                roc_auc = roc_auc_score(
+                    y_test,
+                    probabilities
+                )
+
+                precisions, recalls, thresholds = precision_recall_curve(
+                    y_test,
+                    probabilities
+                )
+
+                f1_scores = (
+                    2 * precisions * recalls /
+                    (precisions + recalls + 1e-10)
+                )
+
+                best_idx = f1_scores[:-1].argmax()
+
+                best_threshold = float(
+                    thresholds[best_idx]
+                )
+
+                st.session_state["best_threshold"] = best_threshold
+
+                predictions = (
+                    probabilities >= best_threshold
+                ).astype(int)
+
+                confidence_probabilities = probabilities
 
             else:
 
-                model.fit(X_train, y_train)
-                predictions = model.predict(X_test)
+                # Clear any leftover LR threshold from a previous run
+                st.session_state["best_threshold"] = 0.5
 
-            accuracy = accuracy_score(y_test, predictions)
-            positive_label = sorted(y.unique())[-1]
+                model.fit(
+                    X_train,
+                    y_train
+                )
+
+                predictions = model.predict(
+                    X_test
+                )
+
+                if hasattr(model, "predict_proba"):
+
+                    confidence_probabilities = model.predict_proba(
+                        X_test
+                    )[:, 1]
+
+                else:
+
+                    confidence_probabilities = None
+
+            accuracy = accuracy_score(
+                y_test,
+                predictions
+            )
+
+            positive_label = sorted(
+                y.unique()
+            )[-1]
 
             precision = precision_score(
                 y_test,
@@ -443,74 +675,98 @@ with tab4:
                 pos_label=positive_label,
                 zero_division=0
             )
-            results.append([
-                model_name,
+
+            results = [[
+                selected_model,
                 accuracy,
                 precision,
                 recall,
                 f1
-            ])
+            ]]
 
-            if accuracy > best_accuracy:
+            best_model = model
+            best_model_name = selected_model
+            best_predictions = predictions
 
-                best_accuracy = accuracy
-                best_model = model
-                best_model_name = model_name
+            best_score = f1 if is_imbalanced else accuracy
 
-        results_df = pd.DataFrame(
-            results,
-            columns=[
-                "Model",
-                "Accuracy",
-                "Precision",
-                "Recall",
-                "F1 Score"
-            ]
-        )
-        st.session_state["results_df"] = results_df
-        st.session_state["best_model"] = best_model
-        st.session_state["best_model_name"] = best_model_name
-        st.session_state["scaler"] = scaler
+            results_df = pd.DataFrame(
+                results,
+                columns=["Model", "Accuracy", "Precision", "Recall", "F1 Score"]
+            )
 
-        st.subheader("Training Results")
+            # -----------------------------------------------------------
+            # Save THIS model as the one and only active model.
+            # Predict tab (tab5) will always use whichever model was
+            # trained last, so switching the dropdown + retraining
+            # always overwrites the active model.
+            # -----------------------------------------------------------
+            st.session_state["results_df"] = results_df
+            st.session_state["best_model"] = best_model
+            st.session_state["best_model_name"] = best_model_name
+            st.session_state["scaler"] = scaler
+            st.session_state["best_predictions"] = best_predictions
+            st.session_state["is_imbalanced"] = is_imbalanced
 
-        st.dataframe(
-            results_df,
-            use_container_width=True
-        )
+            st.subheader("Training Results")
+            st.dataframe(results_df, use_container_width=True)
 
-        st.success(f"🏆 Best Model: {best_model_name}")
+            st.success(f"🏆 Trained Model: {best_model_name}")
 
-        st.metric(
-            "Best Accuracy",
-            f"{best_accuracy:.4f}"
-        )       
+            if is_imbalanced:
+                st.metric("F1 Score", f"{best_score:.4f}")
+            else:
+                st.metric("Accuracy", f"{best_score:.4f}")
+
+            st.subheader("📊 Confusion Matrix")
+            cm = confusion_matrix(y_test, best_predictions)
+            cm_df = pd.DataFrame(
+                cm,
+                index=["Actual Negative", "Actual Positive"],
+                columns=["Predicted Negative", "Predicted Positive"]
+            )
+            st.dataframe(cm_df, use_container_width=True)
+
+        elif "best_model_name" in st.session_state:
+
+            st.info(
+                f"Active trained model → **{st.session_state['best_model_name']}**. "
+                f"Pick a different model above and click Train to switch."
+            )
+
     else:
 
         st.info("Please upload and preprocess a dataset first.")
 
+
 with tab5:
 
-    if "best_model" in st.session_state:
+    if "best_model" not in st.session_state:
+        st.info("Please train a model first.")
+    else:
 
         best_model = st.session_state["best_model"]
-
         cleaned_df = st.session_state["cleaned_df"]
-
         target_column = st.session_state["target_column"]
-
         label_encoders = st.session_state["label_encoders"]
-
         scaler = st.session_state["scaler"]
+
+        target_label_map = st.session_state.get(
+            "target_label_map",
+            {0: "0", 1: "1"}
+        )
 
         st.subheader("🔮 Prediction")
 
+        st.caption(
+            f"Predicting with active model → **{st.session_state['best_model_name']}**"
+        )
+
         feature_columns = [
-            col for col in cleaned_df.columns
-            if col != target_column
+            c for c in cleaned_df.columns
+            if c != target_column
         ]
 
-        # Remove leakage columns
         leakage_columns = [
             "Final_Exam_Score",
             "Final Score",
@@ -521,39 +777,43 @@ with tab5:
         ]
 
         feature_columns = [
-            col for col in feature_columns
-            if col not in leakage_columns
+            c for c in feature_columns
+            if c not in leakage_columns
         ]
-        user_input = {}
 
         category_values = st.session_state["category_values"]
 
-        numerical_columns = st.session_state["numerical_columns"]
+        with st.form("prediction_form"):
 
-        for col in feature_columns:
+            user_input = {}
 
-            if col in category_values:
+            for col in feature_columns:
 
-                user_input[col] = st.selectbox(
-                    col,
-                    category_values[col]
-                )
+                if col in category_values:
 
-            else:
+                    user_input[col] = st.selectbox(
+                        col,
+                        category_values[col]
+                    )
 
-                default_value = float(cleaned_df[col].median())
+                else:
 
-                user_input[col] = st.number_input(
-                    col,
-                    value=default_value
-                )
+                    user_input[col] = st.number_input(
+                        col,
+                        value=float(cleaned_df[col].median())
+                    )
 
-        input_df = pd.DataFrame([user_input])
-        if st.button("🔮 Predict"):
+            submitted = st.form_submit_button(
+                "🔮 Predict"
+            )
 
-            prediction_data = input_df.copy()
+        if submitted:
 
-            categorical_columns = st.session_state["categorical_columns"]
+            prediction_data = pd.DataFrame([user_input])
+
+            categorical_columns = st.session_state[
+                "categorical_columns"
+            ]
 
             for col in categorical_columns:
 
@@ -562,67 +822,83 @@ with tab5:
 
                 try:
 
-                    prediction_data[col] = label_encoders[col].transform(
-                        prediction_data[col]
+                    prediction_data[col] = (
+                        label_encoders[col]
+                        .transform(prediction_data[col])
                     )
 
                 except ValueError:
 
                     st.error(
-                        f"Invalid value selected for '{col}'."
+                        f"Invalid category selected for '{col}'."
                     )
-
                     st.stop()
 
-            # Arrange columns exactly like training
             prediction_data = prediction_data.reindex(
                 columns=st.session_state["feature_columns"]
             )
 
-            # Scale only for Logistic Regression
-            if best_model.__class__.__name__ == "LogisticRegression":
+            model_name = best_model.__class__.__name__
 
-                prediction_data = scaler.transform(prediction_data)
-            prediction = best_model.predict(
-                prediction_data
-            )[0]
+            probability = None
+            threshold = None
 
-            target_encoder = st.session_state["target_encoder"]
+            if model_name == "LogisticRegression":
 
-            if target_encoder is not None:
-
-                prediction_text = target_encoder.inverse_transform([prediction])[0]
-
-            else:
-
-                class0 = st.session_state.get(
-                    "class0_label",
-                    str(sorted(st.session_state["original_df"][target_column].unique())[0])
-                )
-
-                class1 = st.session_state.get(
-                    "class1_label",
-                    str(sorted(st.session_state["original_df"][target_column].unique())[1])
-                )
-                if prediction == 0:
-                    prediction_text = class0
-                else:
-                    prediction_text = class1
-
-            if hasattr(best_model, "predict_proba"):
-
-                probability = best_model.predict_proba(
+                prediction_scaled = scaler.transform(
                     prediction_data
-                )[0]
+                )
 
-                confidence = float(max(probability))
+                probability = float(
+                    best_model.predict_proba(
+                        prediction_scaled
+                    )[0][1]
+                )
+
+                threshold = st.session_state.get(
+                    "best_threshold",
+                    0.5
+                )
+
+                prediction = int(
+                    probability >= threshold
+                )
+
+                confidence = max(
+                    probability,
+                    1 - probability
+                )
 
             else:
 
-                confidence = 1.0
+                prediction = int(
+                    best_model.predict(
+                        prediction_data
+                    )[0]
+                )
 
+                if hasattr(best_model, "predict_proba"):
 
-            st.success(f"Prediction : {prediction_text}")
+                    probs = best_model.predict_proba(
+                        prediction_data
+                    )[0]
+
+                    confidence = float(max(probs))
+                    probability = float(probs[1])
+
+                else:
+
+                    confidence = 1.0
+
+            prediction_name = target_label_map.get(
+                prediction,
+                str(prediction)
+            )
+
+            st.success(
+                f"Prediction : {prediction} ({prediction_name})"
+            )
+
             st.subheader("Prediction Confidence")
 
             st.progress(confidence)
@@ -632,12 +908,22 @@ with tab5:
                 f"{confidence*100:.2f}%"
             )
 
+            if probability is not None:
+
+                st.metric(
+                    "Positive Class Probability",
+                    f"{probability*100:.2f}%"
+                )
+
+            if model_name == "LogisticRegression" and threshold is not None:
+
+                st.metric(
+                    "Decision Threshold",
+                    f"{threshold:.3f}"
+                )
+
             st.divider()
 
             st.caption(
                 f"Model Used : {st.session_state['best_model_name']}"
             )
-
-    else:
-
-        st.info("Please train the models first.")
